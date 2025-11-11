@@ -284,7 +284,8 @@ def compute_mis_weights_with_cp(
         values = slice_cp_and_concat(values, total_lengths, response_lengths)
         result_metrics[key_name] = values
 
-    pg_loss = pg_loss * is_weights
+    if args.use_tis:
+        pg_loss = pg_loss * is_weights
 
     return pg_loss, modified_masks, result_metrics
 
