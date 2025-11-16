@@ -27,37 +27,38 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-4B
+   --hf-checkpoint /root/Qwen3-4B-Base
    #--hf-checkpoint /root/Qwen3-4B-FP8
-   --ref-load /root/Qwen3-4B_torch_dist
-   --load /root/Qwen3-4B_slime/
-   --save /root/Qwen3-4B_slime/
-   --save-interval 20
+   --ref-load /root/Qwen3-4B-Base_torch_dist
+   --load /root/Qwen3-4B_slime_base_drpo/
+   --save /root/Qwen3-4B_slime_base_drpo/
+   --save-interval 50
+   # --rotary-base 5000000
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data /root/slime/data/dapo_filter/train_converted.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
    --rollout-shuffle
-   --rm-type deepscaler
+   --rm-type dapo
    --num-rollout 3000
-   --rollout-batch-size 32
-   --n-samples-per-prompt 8
+   --rollout-batch-size 64
+   --n-samples-per-prompt 16
    --rollout-max-response-len 8192
-   --rollout-temperature 0.8
+   --rollout-temperature 1
 
-   --global-batch-size 256
+   --global-batch-size 1024
    --balance-data
 )
 
 EVAL_ARGS=(
    --eval-interval 20
-   --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
+   --eval-prompt-data aime /root/slime/data/aime-combined.jsonl
    --n-samples-per-eval-prompt 16
-   --eval-max-response-len 16384
-   --eval-top-p 0.7
+   --eval-max-response-len 8196
+   --eval-top-p 0.95
 )
 
 PERF_ARGS=(
@@ -91,16 +92,16 @@ OPTIMIZER_ARGS=(
    --optimizer adam
    --lr 1e-6
    --lr-decay-style constant
-   --weight-decay 0.1
+   --weight-decay 0.01
    --adam-beta1 0.9
    --adam-beta2 0.98
 )
 
 WANDB_ARGS=(
-   # --use-wandb
-   # --wandb-project slime-dev
-   # --wandb-group qwen3-4B-test
-   # --wandb-key ${WANDB_KEY}
+   --use-wandb
+   --wandb-project slime-dapo
+   --wandb-group qwen3-4B-base-dapo
+   --wandb-key ${WANDB_KEY}
 )
 
 SGLANG_ARGS=(
@@ -119,6 +120,16 @@ MISC_ARGS=(
    --attention-backend flash
 )
 
+CUSTOM_ARGS=(
+   # --custom-generate-function-path generate_with_search.generate
+   # --custom-rm-path generate_with_search.reward_func
+
+   # TIS-related args, recommended to enable when using TIS
+   # --use-tis
+   --custom-config-path examples/train_infer_mismatch_helper/mis.yaml
+   --custom-tis-function-path examples.train_infer_mismatch_helper.mis.compute_mis_weights_with_cp
+)
+
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
@@ -128,7 +139,7 @@ RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
+    \"NCCL_NVLS_ENABLE\": \"0\"
   }
 }"
 
@@ -147,4 +158,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
    ${SGLANG_ARGS[@]} \
-   ${MISC_ARGS[@]}
+   ${MISC_ARGS[@]} \
+   ${CUSTOM_ARGS[@]}
