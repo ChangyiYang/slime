@@ -15,6 +15,9 @@ from megatron.core import mpu
 # Constant divisor instead of effective token count
 DIVISOR = 1000.0
 
+# Track call count for logging
+_call_count = 0
+
 
 def get_pg_loss_reducer(
     total_lengths: list[int],
@@ -42,6 +45,17 @@ def get_pg_loss_reducer(
     Returns:
         A callable function that takes a tensor and returns a scalar tensor.
     """
+    global _call_count
+    _call_count += 1
+
+    # Log every 100 calls or the first 5 calls
+    if _call_count <= 5 or _call_count % 100 == 0:
+        print(f"[DrGRPO custom_reducer] get_pg_loss_reducer called (call #{_call_count})")
+        print(f"  - num_samples: {len(response_lengths)}")
+        print(f"  - response_lengths: {response_lengths[:3]}{'...' if len(response_lengths) > 3 else ''}")
+        print(f"  - DIVISOR: {DIVISOR}")
+        print(f"  - calculate_per_token_loss: {calculate_per_token_loss}")
+
     assert mpu.get_context_parallel_world_size() == 1, "This custom reducer only supports cp_size == 1"
 
     if calculate_per_token_loss:

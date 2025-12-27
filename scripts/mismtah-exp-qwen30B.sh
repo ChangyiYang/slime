@@ -1,5 +1,7 @@
 #!/bin/bash
 
+
+
 # for rerun the task
 pkill -9 sglang
 sleep 3
@@ -15,6 +17,8 @@ set -ex
 # will prevent ray from buffering stdout/stderr
 export PYTHONBUFFERED=16
 
+export CUDA_VISIBLE_DEVICES=2,3
+
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
     HAS_NVLINK=1
@@ -24,17 +28,16 @@ fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/qwen3-30B-A3B.sh"
+source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-30B-A3B-Base
-   --ref-load /root/Qwen3-30B-A3B-Base_torch_dist
-   --load /root/Qwen3-30B-A3B_slime_base/
+   --hf-checkpoint /root/Qwen3-4B-Base
+   --ref-load /root/Qwen3-4B-Base_torch_dist
+#    --load /root/Qwen3-4B_slime_base/
    
    # 如果需要从特定step续训
    # --ckpt-step 649
    
-   # --load /root/Qwen3-4B_slime_base_drpo/
    # --save /root/Qwen3-4B_slime_base_drpo/
    # --save-interval 50
    
@@ -43,39 +46,37 @@ CKPT_ARGS=(
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo/train_converted.jsonl
+   --prompt-data ./data/train_converted.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
    --rollout-shuffle
-   --rm-type deepscaler # change to deepscaler
+   --custom-rm-path examples.DAPO.hf_math_verify.get_dapo_math_reward_async
    --num-rollout 3000
-   --rollout-batch-size 32
+   --rollout-batch-size 16
    --n-samples-per-prompt 8
    --rollout-max-response-len 16384
    
    # should be 1
    --rollout-temperature 1
 
-   --global-batch-size 256
+   --global-batch-size 128
    --balance-data
 )
 
 EVAL_ARGS=(
-   --eval-interval 250
-   --eval-prompt-data aime /root/aime/aime-combined.jsonl
-   --n-samples-per-eval-prompt 16
-   --eval-max-response-len 16384
-   --eval-top-p 0.95
+#    --eval-interval 250
+#    --eval-prompt-data aime /root/aime/aime-combined.jsonl
+#    --n-samples-per-eval-prompt 16
+#    --eval-max-response-len 16384
+#    --eval-top-p 0.95
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 4
+   --tensor-model-parallel-size 2
    --sequence-parallel
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 8
-   --expert-tensor-parallel-size 1
 
    --recompute-granularity full
    --recompute-method uniform
@@ -108,16 +109,16 @@ OPTIMIZER_ARGS=(
 )
 
 WANDB_ARGS=(
-   --use-wandb
-   --wandb-project slime-dapo
-   --wandb-group qwen3-30B-A3B-Base-1
-   --wandb-key ${WANDB_API_KEY}
+#    --use-wandb
+#    --wandb-project slime-dapo
+#    --wandb-group qwen3-4B-Base-2gpu
+#    --wandb-key ${WANDB_API_KEY}
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 8
+   --rollout-num-gpus-per-engine 2
    --sglang-mem-fraction-static 0.7
-   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 128)
 )
 
 MISC_ARGS=(
@@ -140,7 +141,7 @@ CUSTOM_ARGS=(
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 # Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
@@ -155,7 +156,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node 8 \
+   --actor-num-gpus-per-node 2 \
    --colocate \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
