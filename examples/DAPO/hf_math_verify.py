@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
 import re
 from itertools import product
 
@@ -20,9 +19,6 @@ from math_verify.grader import sympy_expr_eq
 from sympy import Basic, MatrixBase
 
 from .parser import extract_answer as qwen_extract_answer
-
-# Track call count for logging
-_call_count = 0
 
 
 def extract_last_boxed(text):
@@ -53,10 +49,11 @@ def extract_solution(response):
 
 
 def _verify_with_sympy(gold, target, float_rounding=6, numeric_precision=15, strict=True):
-    """Compare gold and target using sympy with timeout protection."""
-    from math_verify.utils import timeout
-
-    @timeout(5)
+    """Compare gold and target using sympy.
+    
+    Note: Removed timeout decorator because signal.alarm doesn't work in 
+    Ray worker threads (non-main thread), causing all comparisons to fail.
+    """
     def compare_single(gold, target):
         if isinstance(gold, (Basic, MatrixBase)) and isinstance(target, (Basic, MatrixBase)):
             return sympy_expr_eq(gold, target, float_rounding, numeric_precision, strict)
@@ -148,21 +145,9 @@ async def get_dapo_math_reward_async(args, sample, **kwargs):
     Returns:
         1 if correct, 0 if incorrect
     """
-    global _call_count
-    _call_count += 1
-
     response = sample.response
     label = sample.label
-    reward = get_dapo_math_reward(response, label)
-
-    # Log every 100 calls, first 5 calls, or randomly 1% of the time
-    if _call_count <= 5 or _call_count % 100 == 0 or random.random() < 0.01:
-        print(f"\n[DAPO hf_math_verify] get_dapo_math_reward_async called (call #{_call_count})")
-        print(f"  - label: {label}")
-        print(f"  - response (last 100 chars): ...{response[-100:] if len(response) > 100 else response}")
-        print(f"  - reward: {reward}")
-
-    return reward
+    return get_dapo_math_reward(response, label)
 
 
 if __name__ == "__main__":
