@@ -79,9 +79,15 @@ def _verify_with_sympy(gold, target, float_rounding=6, numeric_precision=15, str
 
 def _hf_verify(gold, target):
     """Verify using HuggingFace math_verify library."""
+    # Fast path: if strings are identical, return True immediately
+    if gold == target:
+        return True
+    
     try:
-        parsed_target = parse(target)
-        parsed_gold = parse(gold)
+        # Disable timeout in parse() because signal.alarm() doesn't work in 
+        # Ray worker threads (non-main thread)
+        parsed_target = parse(target, parsing_timeout=None)
+        parsed_gold = parse(gold, parsing_timeout=None)
         return _verify_with_sympy(gold=parsed_gold, target=parsed_target)
     except Exception:
         return False
@@ -108,7 +114,7 @@ def get_dapo_math_reward(response, label):
 
     # Extract answer from response
     extracted_answer = extract_solution(response)
-    if extracted_answer is None:
+    if not extracted_answer:  # Check for None or empty string
         return 0
 
     # Wrap answers in boxed format for math_verify
