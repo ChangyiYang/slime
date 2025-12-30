@@ -30,6 +30,8 @@ from slime.utils.ppo_utils import (
 from slime.utils.processing_utils import load_processor, load_tokenizer
 from slime.utils.ray_utils import Box
 from slime.utils.timer import Timer, inverse_timer, timer
+import torch.cuda.nvtx as nvtx
+from contextlib import contextmanager
 from slime.utils.tracking_utils import init_tracking
 
 from ...utils import tracking_utils
@@ -40,6 +42,16 @@ from .lr_scheduler import get_lr_scheduler
 from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTensor
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def nvtx_range(name: str):
+    """NVTX range context manager for profiling."""
+    nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        nvtx.range_pop()
 
 
 class FSDPTrainRayActor(TrainRayActor):
@@ -375,18 +387,20 @@ class FSDPTrainRayActor(TrainRayActor):
                 for batch in self.prof.iterate_train_log_probs(
                     tqdm(packed_batches, desc=f"{store_prefix}log_probs", disable=dist.get_rank() != 0)
                 ):
-                    model_args = self._get_model_inputs_args(batch)
-                    logits = active_model(**model_args).logits.squeeze(0).float()
-                    log_probs_result, entropy_result = get_logprob_and_entropy_with_cp(
-                        logits=logits,
-                        target_tokens=batch["tokens"],
-                        cp_rank=self.cp_rank,
-                        cp_size=self.cp_size,
-                        cp_group=self.cp_group,
-                        model_input_ids=model_args["input_ids"],
-                        allow_compile=not self.args.true_on_policy_mode,
-                        temperature=self.args.rollout_temperature,
-                    )
+                    with nvtx_range(f"{store_prefix}log_probs_forward"):
+                        model_args = self._get_model_inputs_args(batch)
+                        logits = active_model(**model_args).logits.squeeze(0).float()
+                    with nvtx_range(f"{store_prefix}log_probs_compute"):
+                        log_probs_result, entropy_result = get_logprob_and_entropy_with_cp(
+                            logits=logits,
+                            target_tokens=batch["tokens"],
+                            cp_rank=self.cp_rank,
+                            cp_size=self.cp_size,
+                            cp_group=self.cp_group,
+                            model_input_ids=model_args["input_ids"],
+                            allow_compile=not self.args.true_on_policy_mode,
+                            temperature=self.args.rollout_temperature,
+                        )
                     batch[f"{store_prefix}log_probs"] = log_probs_result
                     if store_prefix == "":
                         batch["entropy"] = entropy_result
@@ -502,6 +516,10 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
     def _log_rollout_data(self, rollout_id: int, rollout_data, packed_batches):
+        # CUDA sync before computing metrics for accurate timing
+        torch.cuda.synchronize()
+        
+        nvtx.range_push("log_rollout_data")
         log_dict = {}
         if "raw_reward" in rollout_data and dist.get_rank() == 0:
             raw_reward_list = rollout_data["raw_reward"]
@@ -525,6 +543,7 @@ class FSDPTrainRayActor(TrainRayActor):
             log_dict[f"rollout/{metric_key}"] = (
                 val / (self.args.n_samples_per_prompt * self.args.rollout_batch_size)
             ).item()
+        nvtx.range_pop()  # log_rollout_data
         if dist.get_rank() == 0:
             logger.info(f"rollout {rollout_id}: {log_dict}")
             log_dict["rollout/step"] = compute_rollout_step(self.args, rollout_id)
@@ -538,6 +557,7 @@ class FSDPTrainRayActor(TrainRayActor):
             )
 
     def _train_core(self, rollout_id: int, rollout_data) -> None:
+        nvtx.range_push(f"train_core_rollout_{rollout_id}")
         if self.args.advantage_estimator in ["grpo", "gspo"]:
             rollout_data["advantages"] = rollout_data["returns"] = [
                 torch.tensor([rollout_data["rewards"][i]] * rollout_data["response_lengths"][i])
@@ -546,7 +566,9 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             raise NotImplementedError(f"Unsupported advantage_estimator {self.args.advantage_estimator}")
 
+        nvtx.range_push("data_packing")
         packed_batches, grad_accum = self._packed_data(rollout_data)
+        nvtx.range_pop()  # data_packing
         
         if dist.get_rank() == 0:
             logger.info(
@@ -562,12 +584,18 @@ class FSDPTrainRayActor(TrainRayActor):
         ), f"Invalid grad_accum {grad_accum} for micro_batch_size {self.args.micro_batch_size} and global_batch_size {self.args.global_batch_size}"
 
         if self.ref_model is not None:
+            nvtx.range_push("ref_log_probs_compute")
             self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+            nvtx.range_pop()  # ref_log_probs_compute
 
+        nvtx.range_push("actor_log_probs_compute")
         self._compute_log_prob("actor", packed_batches)
+        nvtx.range_pop()  # actor_log_probs_compute
+        
         self._log_rollout_data(rollout_id, rollout_data, packed_batches)
 
         with timer("actor_train"):
+            nvtx.range_push("actor_train_loop")
             reported_accum: dict[str, list[torch.Tensor]] = {}
             self.optimizer.zero_grad(set_to_none=True)
             for mbs_id, packed_batch in self.prof.iterate_train_actor(
@@ -579,6 +607,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     mbs_id=mbs_id,
                     grad_accum=grad_accum,
                 )
+            nvtx.range_pop()  # actor_train_loop
 
         self.prof.step(rollout_id=rollout_id)
 
@@ -593,18 +622,24 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 logger.info(f"Updating ref model at rollout_id {rollout_id}")
             # Copy actor model state to ref model
+            nvtx.range_push("ref_model_update")
             actor_state = self.model.state_dict()
             self.ref_model.load_state_dict(actor_state)
             self.ref_model.cpu()
+            nvtx.range_pop()  # ref_model_update
+        nvtx.range_pop()  # train_core_rollout_{rollout_id}
 
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
+        nvtx.range_push(f"train_step_{mbs_id}")
         if dist.get_rank() == 0:
             logger.info(f"[DEBUG] _train_step: mbs_id={mbs_id}, grad_accum={grad_accum}")
         # Prepare model inputs
         model_args = self._get_model_inputs_args(packed_batch)
         if dist.get_rank() == 0:
             logger.info(f"[DEBUG] Before model forward")
+        nvtx.range_push("train_forward")
         logits = self.model(**model_args).logits.squeeze(0).float()
+        nvtx.range_pop()  # train_forward
         if dist.get_rank() == 0:
             logger.info(f"[DEBUG] After model forward")
 
@@ -771,7 +806,9 @@ class FSDPTrainRayActor(TrainRayActor):
         loss = loss * self.dp_size / self.args.global_batch_size
         if dist.get_rank() == 0:
             logger.info(f"[DEBUG] Before loss.backward(), mbs_id={mbs_id}")
+        nvtx.range_push("train_backward")
         loss.backward()
+        nvtx.range_pop()  # train_backward
         if dist.get_rank() == 0:
             logger.info(f"[DEBUG] After loss.backward(), mbs_id={mbs_id}")
 
@@ -780,12 +817,15 @@ class FSDPTrainRayActor(TrainRayActor):
             reported_accum.setdefault(k, []).append(v)
 
         if (mbs_id + 1) in grad_accum:
+            nvtx.range_push("optimizer_step")
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] mbs_id={mbs_id}, grad_accum={grad_accum}, starting optimizer step")
             # TODO: check if the grad norm is global grad norm.
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] Before clip_grad_norm_")
+            nvtx.range_push("clip_grad_norm")
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad)
+            nvtx.range_pop()  # clip_grad_norm
 
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] Afteer clip_grad_norm_, start float(grad_norm)")
@@ -794,14 +834,22 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] After float(grad_norm), grad_norm={grad_norm}, starting optimizer.step()")
 
+            nvtx.range_push("optimizer_step_call")
             self.optimizer.step()
+            nvtx.range_pop()  # optimizer_step_call
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] After optimizer.step(), starting lr_scheduler.step()")
             # Update learning rate
             self.lr_scheduler.step()
             self.optimizer.zero_grad(set_to_none=True)
+            nvtx.range_pop()  # optimizer_step
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] After zero_grad(), aggregating logs")
+            
+            # CUDA sync before aggregating metrics for accurate timing
+            nvtx.range_push("metrics_aggregation")
+            torch.cuda.synchronize()
+            
             # Aggregate logs
             aggregated = {k: torch.stack(v).sum().item() for k, v in reported_accum.items()}
             # TODO: change this, this is slow.
@@ -815,6 +863,8 @@ class FSDPTrainRayActor(TrainRayActor):
             for k in reported_accum.keys():
                 aggregated[k] = sum([r[k] for r in reduced_aggregated]) / (self.args.global_batch_size)
             reported_accum.clear()
+            nvtx.range_pop()  # metrics_aggregation
+            
             if dist.get_rank() == 0:
                 log_dict = {
                     f"train/{k}": (val.item() if torch.is_tensor(val) else val) for k, val in aggregated.items()
@@ -835,6 +885,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 log_dict["train/step"] = self.global_step
                 tracking_utils.log(self.args, log_dict, step_key="train/step")
             self.global_step += 1
+        nvtx.range_pop()  # train_step_{mbs_id}
 
     @timer
     def update_weights(self) -> None:  # type: ignore[override]
