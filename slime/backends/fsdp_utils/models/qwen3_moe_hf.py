@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.cuda.nvtx as nvtx
 from sonicmoe.functional import moe_general_routing_inputs
@@ -8,6 +9,8 @@ from .qwen3_moe_utils import (
     stack_expert_weights_for_sonicmoe,
     prepare_sonicmoe_routing_inputs,
 )
+
+log = logging.getLogger(__name__)
 
 
 def apply_fsdp_moe_patch(args=None):
@@ -31,6 +34,7 @@ def apply_fsdp_moe_patch(args=None):
         moe_impl = getattr(args, "fsdp_moe_impl", "torch") if args is not None else "torch"
 
         if moe_impl == "sonicmoe":
+            log.info("Using SonicMoE MoE implementation")
             nvtx.range_push("MoE_sonicmoe_experts")
             # SonicMoE path: keep HF routing semantics, only swap the experts implementation.
             
@@ -66,6 +70,7 @@ def apply_fsdp_moe_patch(args=None):
                 is_inference_mode_enabled,
             )
         else:
+            log.info("Using torch MoE implementation")
             nvtx.range_push("MoE_torch_experts")
             # Reference path: per-expert loop (correct but slower).
             final_hidden_states = torch.zeros(

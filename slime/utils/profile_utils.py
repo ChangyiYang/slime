@@ -15,6 +15,7 @@ class TrainProfiler:
         self.args = args
         self._torch_profiler_overall = None
         self._memory_profiler_overall = None
+        self._cuda_profiler_started = False
 
         if args.use_pytorch_profiler and ("train_overall" in args.profile_target):
             self._torch_profiler_overall = _create_torch_profiler(args, name="train_overall")
@@ -26,6 +27,20 @@ class TrainProfiler:
     def on_init_end(self):
         if self._torch_profiler_overall is not None:
             self._torch_profiler_overall.start()
+
+    def start_profiler(self, rollout_id: int):
+        """Start CUDA profiler if rollout_id matches profile window."""
+        if rollout_id == self.args.profile_step_start and not self._cuda_profiler_started:
+            logger.info(f"Starting CUDA profiler at rollout {rollout_id}")
+            torch.cuda.cudart().cudaProfilerStart()
+            self._cuda_profiler_started = True
+
+    def stop_profiler(self, rollout_id: int):
+        """Stop CUDA profiler if rollout_id matches profile window."""
+        if rollout_id == self.args.profile_step_end - 1 and self._cuda_profiler_started:
+            logger.info(f"Stopping CUDA profiler at rollout {rollout_id}")
+            torch.cuda.cudart().cudaProfilerStop()
+            self._cuda_profiler_started = False
 
     def step(self, rollout_id: int):
         if self._torch_profiler_overall is not None:

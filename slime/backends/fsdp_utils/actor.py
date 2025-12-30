@@ -516,9 +516,6 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
     def _log_rollout_data(self, rollout_id: int, rollout_data, packed_batches):
-        # CUDA sync before computing metrics for accurate timing
-        torch.cuda.synchronize()
-        
         nvtx.range_push("log_rollout_data")
         log_dict = {}
         if "raw_reward" in rollout_data and dist.get_rank() == 0:
@@ -557,6 +554,7 @@ class FSDPTrainRayActor(TrainRayActor):
             )
 
     def _train_core(self, rollout_id: int, rollout_data) -> None:
+        self.prof.start_profiler(rollout_id)
         nvtx.range_push(f"train_core_rollout_{rollout_id}")
         if self.args.advantage_estimator in ["grpo", "gspo"]:
             rollout_data["advantages"] = rollout_data["returns"] = [
@@ -594,6 +592,7 @@ class FSDPTrainRayActor(TrainRayActor):
         
         self._log_rollout_data(rollout_id, rollout_data, packed_batches)
 
+
         with timer("actor_train"):
             nvtx.range_push("actor_train_loop")
             reported_accum: dict[str, list[torch.Tensor]] = {}
@@ -628,7 +627,8 @@ class FSDPTrainRayActor(TrainRayActor):
             self.ref_model.cpu()
             nvtx.range_pop()  # ref_model_update
         nvtx.range_pop()  # train_core_rollout_{rollout_id}
-
+        self.prof.stop_profiler(rollout_id)
+    
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
         nvtx.range_push(f"train_step_{mbs_id}")
         if dist.get_rank() == 0:
@@ -846,9 +846,7 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 logger.info(f"[DEBUG] After zero_grad(), aggregating logs")
             
-            # CUDA sync before aggregating metrics for accurate timing
             nvtx.range_push("metrics_aggregation")
-            torch.cuda.synchronize()
             
             # Aggregate logs
             aggregated = {k: torch.stack(v).sum().item() for k, v in reported_accum.items()}
