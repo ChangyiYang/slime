@@ -17,6 +17,8 @@ __all__ = ["generate_rollout"]
 # Global variables for evaluation
 TOKENIZER = None
 START_ROLLOUT = True
+# Module-level metadata storage for tracking finished groups
+ROLLOUT_METADATA: dict[str, list[str]] = {}
 
 
 def select_rollout_data(args, results, need_length):
@@ -211,7 +213,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer, evaluation:
         raise NotImplementedError("Evaluation rollout is not implemented")
 
     if START_ROLLOUT:
-        metadata = data_buffer.get_metadata()
+        metadata = ROLLOUT_METADATA
         start_inform = start_rollout(args.rollout_buffer_url, args, metadata)
         print(f"start rollout with payload: {start_inform}")
         print(f"start rollout id: {rollout_id}")
@@ -261,7 +263,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer, evaluation:
         for item in all_meta_info:
             finished_groups_instance_id_list.extend(item["finished_groups"])
 
-        data_buffer.update_metadata({str(rollout_id): finished_groups_instance_id_list})
+        ROLLOUT_METADATA[str(rollout_id)] = finished_groups_instance_id_list
 
     print("finally get rollout data with length: ", len(results))
     sample_results = []

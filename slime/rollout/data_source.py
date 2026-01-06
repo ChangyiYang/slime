@@ -49,8 +49,6 @@ class RolloutDataSource(DataSource):
         self.sample_group_index = 0
         self.sample_index = 0
         self.sample_offset = 0
-        # TODO remove this
-        self.metadata = {}
 
         if args.rollout_global_dataset:
             tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
@@ -123,7 +121,6 @@ class RolloutDataSource(DataSource):
             "epoch_id": self.epoch_id,
             "sample_group_index": self.sample_group_index,
             "sample_index": self.sample_index,
-            "metadata": self.metadata,
         }
         path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -141,14 +138,12 @@ class RolloutDataSource(DataSource):
             logger.info(f"Checkpoint {path} does not exist.")
             return
 
-        logger.info(f"load metadata from {path}")
-        logger.info(f"load metadata: {self.metadata}")
+        logger.info(f"load state from {path}")
         state_dict = torch.load(path)
         self.sample_offset = state_dict.get("sample_offset", 0)
         self.epoch_id = state_dict.get("epoch_id", 0)
         self.sample_group_index = state_dict.get("sample_group_index", 0)
         self.sample_index = state_dict.get("sample_index", 0)
-        self.metadata = state_dict.get("metadata", {})
 
         if self.args.rollout_global_dataset and self.args.rollout_shuffle:
             self.dataset.shuffle(self.epoch_id)
@@ -198,14 +193,6 @@ class RolloutDataSourceWithBuffer(RolloutDataSource):
             ), f"the length of the elements of samples must be equal to n_samples_per_prompt, got {len(samples[i])} != {self.args.n_samples_per_prompt}"
             group = samples[i]  # type: ignore
             self.buffer.append(group)
-
-    # TODO remove
-    def update_metadata(self, metadata: dict):
-        self.metadata.update(metadata)
-
-    # TODO remove
-    def get_metadata(self):
-        return self.metadata
 
     def get_buffer_length(self):
         return len(self.buffer)
